@@ -16,7 +16,7 @@
 | | | |
 |:-------------------------:|:-------------------------:|:-------------------------:|
 | <img src="./screenshots/main.png" alt="A list of device categories with some of them expanded."> | <img src="./screenshots/properties.png" alt="A device properties window open, showing information about an AMD GPU"> | <img src="./screenshots/driver.png" alt="The Driver tab of the Properties window, shwoing the version and date of said GPU driver"> |
-| <img src="./screenshots/olddriver.png" alt="The same Driver tab of the Properties window, but this time showing an older unmaintained driver's date and version."> | <img src="./screenshots/detials.png" alt="The Details tab, shwoing a dropdown with a large text area."> | <img src="./screenshots/resources.png" alt="The Resources tab, shwoing a information about a deviecs resources like IRQ and similar."> |
+| <img src="./screenshots/olddriver.png" alt="The same Driver tab of the Properties window, but this time showing an older unmaintained driver's date and version."> | <img src="./screenshots/details.png" alt="The Details tab, shwoing a dropdown with a large text area."> | <img src="./screenshots/resources.png" alt="The Resources tab, shwoing a information about a deviecs resources like IRQ and similar."> |
 
 
 ## Building
