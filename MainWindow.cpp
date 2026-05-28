@@ -13,6 +13,8 @@
 #include <QStatusBar>
 #include <QAction>
 #include <QMessageBox>
+#include <QProcess>
+#include <QRegularExpression>
 #include <QHeaderView>
 #include <QMenu>
 #include <QDialog>
@@ -138,15 +140,23 @@ void MainWindow::updateActionStates() {
         : QString{};
     bool isDkms = isDevice && m_model->deviceField(idx, "isDkms").toBool();
 
-    bool canDisable = isDevice
+    QString location = isDevice
+        ? m_model->deviceField(idx, "location").toString()
+        : QString{};
+    bool isBtAudio = (location == "connected via Bluetooth");
+
+    bool canDisable = !isBtAudio && isDevice
         && !driver.isEmpty()
         && driver != "(kernel)"
         && isSafeToDisable(driver);
 
     m_actProperties->setEnabled(isDevice);
     m_actUpdateDriver->setEnabled(isDevice);
-    m_actDisable->setEnabled(canDisable || disabled);
-    m_actDisable->setText(disabled ? "Enable Device" : "Disable Device");
+    m_actDisable->setEnabled(canDisable || disabled || isBtAudio);
+    if (isBtAudio)
+        m_actDisable->setText("Disconnect");
+    else
+        m_actDisable->setText(disabled ? "Enable Device" : "Disable Device");
     m_actUninstall->setEnabled(isDkms);
 }
 
@@ -154,8 +164,46 @@ void MainWindow::disableCurrentDevice() {
     auto idx = m_tree->currentIndex();
     if (!idx.isValid()) return;
     QString name = m_model->deviceField(idx, "name").toString();
+    if (name.isEmpty()) return;
+
+    QString location = m_model->deviceField(idx, "location").toString();
+    QString btAddress = m_model->deviceField(idx, "btAddress").toString();
+    if (btAddress.isEmpty())
+        btAddress = m_model->deviceField(idx, "rawLocation").toString();
+    if (location == "connected via Bluetooth") {
+        static const QRegularExpression kMacRe(
+            "^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$");
+        if (!kMacRe.match(btAddress).hasMatch()) {
+            QMessageBox::warning(this, "Disconnect failed",
+                "Invalid device address.");
+            return;
+        }
+        if (QMessageBox::question(this, "Disconnect device",
+                QString("This will disconnect %1.\n\nContinue?")
+                    .arg(name.toHtmlEscaped()))
+            != QMessageBox::Yes)
+            return;
+
+        QProcess proc;
+        proc.start("bluetoothctl", {"disconnect", btAddress});
+        bool ok = proc.waitForFinished(5000);
+        QString out = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
+        if (!ok || (!out.contains("Successful", Qt::CaseInsensitive)
+                    && proc.exitCode() != 0)) {
+            QString err = QString::fromUtf8(
+                proc.readAllStandardError()).trimmed();
+            QMessageBox::warning(this, "Disconnect failed",
+                QString("Could not disconnect %1:\n\n%2")
+                    .arg(name.toHtmlEscaped(),
+                         (err.isEmpty() ? out : err).toHtmlEscaped()));
+            return;
+        }
+        refresh();
+        return;
+    }
+
     QString driver = m_model->deviceField(idx, "driver").toString();
-    if (name.isEmpty() || driver.isEmpty()) return;
+    if (driver.isEmpty()) return;
 
     bool disabled = m_model->deviceField(idx, "disabled").toBool();
     QString action = disabled ? "enable" : "disable";
@@ -239,7 +287,7 @@ void MainWindow::buildMenus() {
         auto *nameLabel = new QLabel("Device Manager");
 
         auto *companyLabel = new QLabel("@actuallyaridan");
-        auto *versionLabel = new QLabel("Version: 1.0");
+        auto *versionLabel = new QLabel("Version: 1.1");
 
         auto *infoLayout = new QVBoxLayout;
         infoLayout->addWidget(nameLabel);
@@ -265,7 +313,7 @@ void MainWindow::buildMenus() {
         descLabel->setContentsMargins(4, 4, 4, 4);
 
         auto *creditsLabel = new QLabel(
-            "Replicated in Linux using Qt and KDE. Best enjoyed with AeroThemePlasma. Any Microsoft branding is used solely for referential use only, and does not aim to usurp copyrights from Microsoft.");
+            "Replicated in Linux with Qt6 and real hardware backends via sysfs/procfs. Best enjoyed with AeroThemePlasma. Any Microsoft branding is used solely for referential use only, and does not aim to usurp copyrights from Microsoft.");
         creditsLabel->setWordWrap(true);
         creditsLabel->setAlignment(Qt::AlignTop | Qt::AlignLeft);
         creditsLabel->setContentsMargins(4, 4, 4, 4);
@@ -393,7 +441,9 @@ void MainWindow::showProperties() {
         m_model->deviceField(idx, "isDkms").toBool(),
         m_model->deviceField(idx, "rawLocation").toString(),
         m_model->deviceField(idx, "sysfsPciPath").toString(),
-        m_model->deviceField(idx, "deviceType").toString()
+        m_model->deviceField(idx, "deviceType").toString(),
+        m_model->deviceField(idx, "btAddress").toString(),
+        m_model->deviceField(idx, "noDriverNeeded").toBool()
     };
     DevicePropertiesDialog dlg(info, this);
     connect(&dlg, &DevicePropertiesDialog::disableToggled,

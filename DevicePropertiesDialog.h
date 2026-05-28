@@ -20,6 +20,8 @@ struct DeviceInfo {
     QString rawLocation;
     QString sysfsPciPath;
     QString deviceType;
+    QString btAddress;
+    bool noDriverNeeded = false;
 };
 
 class DevicePropertiesDialog : public QDialog {

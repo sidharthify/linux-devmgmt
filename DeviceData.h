@@ -17,6 +17,8 @@ struct Device {
     bool isDkms = false;
     QString rawLocation;
     QString sysfsPciPath;
+    QString btAddress;
+    bool noDriverNeeded = false;
 };
 
 struct DeviceCategory {

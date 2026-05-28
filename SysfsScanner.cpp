@@ -304,6 +304,34 @@ QString usbVendorName(const QString &vendorHex) {
     return usbIds().vendors.value(key, key);
 }
 
+// Bluetooth SIG company identifiers — a separate registry from USB vendor IDs.
+// Source: https://www.bluetooth.com/specifications/assigned-numbers/
+QString btCompanyName(const QString &hexId) {
+    static const QHash<quint16, QString> kCompanies = {
+        {0x0000, "Ericsson AB"},
+        {0x0001, "Nokia Mobile Phones"},
+        {0x0002, "Intel Corp."},
+        {0x0003, "IBM Corp."},
+        {0x0004, "Toshiba Corp."},
+        {0x0006, "Microsoft Corp."},
+        {0x000F, "Broadcom Corporation"},
+        {0x0046, "LG Electronics"},
+        {0x004C, "Apple, Inc."},
+        {0x0059, "Nordic Semiconductor ASA"},
+        {0x0075, "Samsung Electronics Co. Ltd."},
+        {0x009E, "Bose Corporation"},
+        {0x00E0, "Google"},
+        {0x012D, "Sony Corporation"},
+        {0x0131, "Beats Electronics"},
+        {0x0217, "Jabra (GN Audio)"},
+    };
+    bool ok;
+    quint16 id = hexId.trimmed().toUShort(&ok, 16);
+    if (!ok)
+        return {};
+    return kCompanies.value(id);
+}
+
 QString readHexId(const QString &path) {
     QString s = readSysFile(path);
     if (s.startsWith("0x"))
@@ -408,6 +436,7 @@ Device makePciDevice(const QString &sysfsPath) {
     Device d;
     QString vendor = readHexId(sysfsPath + "/vendor");
     QString device = readHexId(sysfsPath + "/device");
+    QString cls = readHexId(sysfsPath + "/class");
     const auto &db = pciIds();
     d.manufacturer = db.vendors.value(vendor,
                         QStringLiteral("Vendor %1").arg(vendor));
@@ -424,7 +453,13 @@ Device makePciDevice(const QString &sysfsPath) {
             d.name = marketing;
     }
     d.driver = driverNameFor(sysfsPath);
-    d.status = d.driver.isEmpty() ? "No driver loaded" : "Working properly";
+    // PCI bridges (06xx), IOMMUs (0806xx), and generic system peripherals (0800xx)
+    // are managed entirely by the kernel and never need a userspace driver.
+    bool isKernelManaged = cls.startsWith("06")
+                           || cls.startsWith("0806")
+                           || cls.startsWith("0800");
+    d.noDriverNeeded = isKernelManaged && d.driver.isEmpty();
+    d.status = (d.driver.isEmpty() && !d.noDriverNeeded) ? "No driver loaded" : "Working properly";
     DriverInfo di = moduleDriverInfo(d.driver);
     d.driverVersion = di.version;
     d.driverDate = di.date;
@@ -800,6 +835,19 @@ QVector<Device> scanKeyboards() {
         if (totalBits < 20)
             continue;
 
+        // Reject media-key-only devices (e.g. Bluetooth AVRCP remotes): real
+        // keyboards have letter keys (KEY_Q=16 … KEY_P=25) in the low word.
+        {
+            const QStringList keyWords = key.trimmed().split(' ');
+            if (!keyWords.isEmpty()) {
+                bool ok;
+                quint64 lastWord = keyWords.last().toULongLong(&ok, 16);
+                // Mask covers bits 16-25 (KEY_Q through KEY_P).
+                if (!ok || (lastWord & 0x3FF0000ULL) == 0)
+                    continue;
+            }
+        }
+
         QString phys = readSysFile(path + "/phys");
         if (!phys.isEmpty() && seenPhys.contains(phys))
             continue;
@@ -866,7 +914,9 @@ QVector<Device> scanBluetooth() {
 
     for (const QString &entry : base.entryList(
              QDir::AllEntries | QDir::NoDotAndDotDot)) {
-        if (!entry.startsWith("hci"))
+        // Connection handles (e.g. "hci0:12") share the hci prefix but are
+        // per-device ACL links, not local adapters — skip them.
+        if (!entry.startsWith("hci") || entry.contains(':'))
             continue;
 
         QString path = QFileInfo(
@@ -874,6 +924,7 @@ QVector<Device> scanBluetooth() {
 
         QString name;
         QString mfr;
+        QString usbDevicePath;
         QDir deviceDir(path);
         int depth = 0;
         while (deviceDir.cdUp() && ++depth <= 20) {
@@ -884,9 +935,9 @@ QVector<Device> scanBluetooth() {
             if (!product.isEmpty()) {
                 name = product;
                 mfr = manufacturer;
+                usbDevicePath = deviceDir.absolutePath();
                 break;
             }
-            // Stop at the PCI level.
             if (deviceDir.absolutePath() == "/sys/devices")
                 break;
         }
@@ -907,7 +958,10 @@ QVector<Device> scanBluetooth() {
         d.rawLocation = entry;
         bool ok;
         int hciNum = entry.mid(3).toInt(&ok);
-        d.location = ok ? QString("Bluetooth adapter %1").arg(hciNum) : entry;
+        if (!usbDevicePath.isEmpty())
+            d.location = friendlyLocation(usbDevicePath, {});
+        else
+            d.location = ok ? QString("Bluetooth adapter %1").arg(hciNum) : entry;
         out.append(d);
     }
     return out;
@@ -1292,6 +1346,85 @@ QVector<Device> scanBlacklistedMissing(
     return out;
 }
 
+QVector<Device> scanBluetoothAudio() {
+    QVector<Device> out;
+
+    QString devList = runCmd("bluetoothctl", {"devices"}, 3000);
+    if (devList.isEmpty())
+        return out;
+
+    static const QRegularExpression devRe(
+        R"(Device\s+([0-9A-Fa-f:]{17})\s+(.+))");
+    static const QSet<QString> kAudioUuids = {
+        "0000110a", // Audio Source
+        "0000110b", // Audio Sink (A2DP)
+        "00001108", // Headset
+        "0000111e", // Handsfree (HFP)
+        "00001112", // Headset AG
+        "0000111f", // Handsfree AG
+    };
+
+    for (const QString &line : devList.split('\n')) {
+        auto m = devRe.match(line);
+        if (!m.hasMatch())
+            continue;
+
+        QString addr = m.captured(1);
+        QString name = m.captured(2).trimmed();
+
+        QString info = runCmd("bluetoothctl", {"info", addr}, 3000);
+        if (info.isEmpty())
+            continue;
+
+        bool connected = false;
+        bool isAudio = false;
+        QString mfr;
+
+        static const QRegularExpression modRe(
+            R"(bluetooth:v([0-9A-Fa-f]{4})p)");
+
+        for (const QString &il : info.split('\n')) {
+            QString t = il.trimmed();
+            if (t.startsWith("Connected:") && t.contains("yes"))
+                connected = true;
+            if (t.startsWith("Icon:") && t.contains("audio"))
+                isAudio = true;
+            for (const QString &uuid : kAudioUuids) {
+                if (t.contains(uuid, Qt::CaseInsensitive)) {
+                    isAudio = true;
+                    break;
+                }
+            }
+            auto mm = modRe.match(t);
+            if (mm.hasMatch() && mfr.isEmpty()) {
+                QString vid = mm.captured(1).toLower();
+                mfr = btCompanyName(vid);
+                if (mfr.isEmpty())
+                    mfr = usbVendorName(vid);
+            }
+        }
+
+        if (!connected || !isAudio)
+            continue;
+
+        Device d;
+        d.name = name;
+        d.manufacturer = mfr.isEmpty() ? "(Bluetooth audio device)" : mfr;
+        d.status = "Working properly";
+        d.driver = "btusb";
+        DriverInfo di = moduleDriverInfo(d.driver);
+        d.driverVersion = di.version;
+        d.driverAuthor = di.author;
+        d.driverDate = di.date;
+        d.isDkms = di.isDkms;
+        d.rawLocation = addr;
+        d.btAddress = addr;
+        d.location = "connected via Bluetooth";
+        out.append(d);
+    }
+    return out;
+}
+
 } // namespace
 
 QVector<DeviceCategory> scanDevices() {
@@ -1306,7 +1439,7 @@ QVector<DeviceCategory> scanDevices() {
     auto batteries = scanBatteries();
     batteries += scanHidBatteries();
     addIfAny("Batteries", "kded5", batteries);
-    addIfAny("Bluetooth Radios", "bluetooth-symbolic", scanBluetooth());
+    addIfAny("Bluetooth Radios", "network-bluetooth", scanBluetooth());
     addIfAny("Disk drives", "drive-harddisk", scanDisks());
     addIfAny("Display adapters", "video-display", scanPciByClass("03"));
     addIfAny("DVD/CD-ROM drives", "media-optical", scanOpticalDrives());
@@ -1319,8 +1452,9 @@ QVector<DeviceCategory> scanDevices() {
     addIfAny("Network adapters", "folder-network", scanNetwork());
     addIfAny("Processors", "cpu", scanCpus());
     addIfAny("Security devices", "drive-harddisk-encrypted", scanTpm());
-    addIfAny("Sound, video and game controllers", "kmix",
-             scanSoundCards());
+    auto soundDevs = scanSoundCards();
+    soundDevs += scanBluetoothAudio();
+    addIfAny("Sound, video and game controllers", "kmix", soundDevs);
     addIfAny("Storage controllers", "drive-harddisk",
              scanStorageControllers());
     auto sysDevs = scanSystemDevices();

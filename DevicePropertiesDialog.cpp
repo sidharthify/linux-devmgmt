@@ -24,6 +24,7 @@
 #include <QGroupBox>
 #include <QTextEdit>
 #include <QMessageBox>
+#include <QProcess>
 #include <QFile>
 #include <QRegularExpression>
 #include <QTextStream>
@@ -160,11 +161,16 @@ QWidget *DevicePropertiesDialog::buildGeneralTab() {
     QString statusText;
     if (m_info.disabled)
         statusText = "This device is disabled.";
+    else if (m_info.noDriverNeeded)
+        statusText = "This device is working properly and does not require a driver because it is completely managed by the kernel.";
     else if (m_info.status == "Working properly")
         statusText = "This device is working properly.";
     else if (m_info.status == "No driver loaded")
         statusText = "The drivers for this device are not installed. "
                      "(Code 28)";
+    else if (m_info.status.startsWith("Battery level: "))
+        statusText = "This device is working properly.\n\nCurrent battery level: "
+                     + m_info.status.mid(15);
     else
         statusText = m_info.status + ".";
 
@@ -231,21 +237,44 @@ QWidget *DevicePropertiesDialog::buildDriverTab() {
         ++fRow;
     };
 
-    auto stripAuthorAnnotations = [](QString s) {
-        static const QRegularExpression kAnnotation(R"(\s*[<({\[].*?[>)}\]])", QRegularExpression::DotMatchesEverythingOption);
-        s.remove(kAnnotation);
-        return s.trimmed();
-    };
-    QString providerName = !m_info.driverAuthor.isEmpty()
-                          ? stripAuthorAnnotations(m_info.driverAuthor)
-                          : m_info.manufacturer.startsWith("(Standard")
-                            ? QStringLiteral("Linux") : m_info.manufacturer;
-    addFormRow(makeWrappingKey("Driver Provider:"), makeWrappingValue(providerName));
-    addFormRow(makeWrappingKey("Driver Date:"), makeWrappingValue(
-        m_info.driverDate.isEmpty() ? "Unknown" : m_info.driverDate));
-    addFormRow(makeWrappingKey("Driver Version:"), makeWrappingValue(
-        m_info.driverVersion.isEmpty() ? m_info.driver : m_info.driverVersion));
-    addFormRow(makeWrappingKey("Digital Signer:"), makeWrappingValue("Linux Hardware Compatibility Publisher"));
+    if (m_info.noDriverNeeded) {
+        addFormRow(makeWrappingKey("Driver Provider:"), makeWrappingValue("Unknown"));
+        addFormRow(makeWrappingKey("Driver Date:"), makeWrappingValue("Not available"));
+        addFormRow(makeWrappingKey("Driver Version:"), makeWrappingValue("Not available"));
+        addFormRow(makeWrappingKey("Digital Signer:"), makeWrappingValue("Not digitally signed"));
+    } else {
+        auto stripAuthorAnnotations = [](QString s) {
+            static const QRegularExpression kAnnotation(R"(\s*[<({\[].*?[>)}\]])", QRegularExpression::DotMatchesEverythingOption);
+            s.remove(kAnnotation);
+            return s.trimmed();
+        };
+        QString providerName;
+        if (!m_info.driverAuthor.isEmpty()) {
+            providerName = stripAuthorAnnotations(m_info.driverAuthor);
+            static const QSet<QString> kMinorWords = {
+                "a", "an", "the", "and", "but", "or", "nor", "for", "so", "yet",
+                "at", "by", "in", "of", "on", "to", "up", "as", "is",
+                // name particles (Dutch, German, French, Italian, Spanish, Portuguese)
+                "van", "von", "de", "den", "der", "del", "della", "di", "du", "le", "la", "las", "los"
+            };
+            QStringList words = providerName.split(' ', Qt::SkipEmptyParts);
+            for (int i = 0; i < words.size(); ++i) {
+                QString &w = words[i];
+                if (i == 0 || !kMinorWords.contains(w.toLower()))
+                    w[0] = w[0].toUpper();
+            }
+            providerName = words.join(' ');
+        } else {
+            providerName = m_info.manufacturer.startsWith("(Standard")
+                           ? QStringLiteral("Linux") : m_info.manufacturer;
+        }
+        addFormRow(makeWrappingKey("Driver Provider:"), makeWrappingValue(providerName));
+        addFormRow(makeWrappingKey("Driver Date:"), makeWrappingValue(
+            m_info.driverDate.isEmpty() ? "Unknown" : m_info.driverDate));
+        addFormRow(makeWrappingKey("Driver Version:"), makeWrappingValue(
+            m_info.driverVersion.isEmpty() ? m_info.driver : m_info.driverVersion));
+        addFormRow(makeWrappingKey("Digital Signer:"), makeWrappingValue("Linux Hardware Compatibility Publisher"));
+    }
     v->addLayout(form);
 
     v->addSpacing(16);
@@ -277,7 +306,9 @@ QWidget *DevicePropertiesDialog::buildDriverTab() {
         !isKernelModule());
 
     auto *updateBtn = addRow("Update Driver...",
-        "To update the driver software for this device.", true);
+        "To update the driver software for this device.",
+        !m_info.noDriverNeeded,
+        m_info.noDriverNeeded ? "This device does not require a driver." : QString{});
 
     addRow("Roll Back Driver",
         "If the device fails after updating the driver, roll back "
@@ -285,17 +316,23 @@ QWidget *DevicePropertiesDialog::buildDriverTab() {
         false,
         "No previous driver version is stored for this device.");
 
-    QString disableLabel = m_info.disabled ? "Enable" : "Disable";
-    QString disableDesc = m_info.disabled
-        ? "Enables the selected device."
-        : "Disables the selected device.";
-    bool canDisable = !isKernelModule() && isSafeToDisable(m_info.driver);
+    bool isBtAudio = (m_info.location == "connected via Bluetooth");
+    QString disableLabel = isBtAudio ? "Disconnect"
+                         : (m_info.disabled ? "Enable" : "Disable");
+    QString disableDesc = isBtAudio
+        ? "Disconnects this Bluetooth device from your computer."
+        : (m_info.disabled ? "Enables the selected device."
+                           : "Disables the selected device.");
+    bool canDisable = isBtAudio
+        || (!isKernelModule() && isSafeToDisable(m_info.driver));
     QString disableTooltip;
-    if (isKernelModule())
-        disableTooltip = "Built-in kernel devices cannot be disabled.";
-    else if (!isSafeToDisable(m_info.driver))
-        disableTooltip = "This device is critical to system operation "
-                         "and cannot be disabled.";
+    if (!isBtAudio) {
+        if (isKernelModule())
+            disableTooltip = "Built-in kernel devices cannot be disabled.";
+        else if (!isSafeToDisable(m_info.driver))
+            disableTooltip = "This device is critical to system operation "
+                             "and cannot be disabled.";
+    }
 
     m_disableBtn = addRow(disableLabel, disableDesc,
                           canDisable || m_info.disabled,
@@ -323,8 +360,44 @@ QWidget *DevicePropertiesDialog::buildDriverTab() {
     });
 
     connect(m_disableBtn, &QPushButton::clicked, this, [this] {
-        bool disabling = !m_info.disabled;
         const QString safeName = m_info.name.toHtmlEscaped();
+
+        if (m_info.location == "connected via Bluetooth") {
+            QString addr = m_info.btAddress.isEmpty()
+                           ? m_info.rawLocation : m_info.btAddress;
+            static const QRegularExpression kMacRe(
+                "^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$");
+            if (!kMacRe.match(addr).hasMatch()) {
+                QMessageBox::warning(this, "Disconnect failed",
+                    "Invalid device address.");
+                return;
+            }
+            if (QMessageBox::question(this, "Disconnect device",
+                    QString("This will disconnect %1 from your computer.\n\nContinue?")
+                        .arg(safeName)) != QMessageBox::Yes)
+                return;
+
+            QProcess proc;
+            proc.start("bluetoothctl", {"disconnect", addr});
+            bool ok = proc.waitForFinished(5000);
+            QString out = QString::fromUtf8(
+                proc.readAllStandardOutput()).trimmed();
+            if (!ok || (!out.contains("Successful", Qt::CaseInsensitive)
+                        && proc.exitCode() != 0)) {
+                QString err = QString::fromUtf8(
+                    proc.readAllStandardError()).trimmed();
+                QMessageBox::warning(this, "Disconnect failed",
+                    QString("Could not disconnect %1:\n\n%2")
+                        .arg(safeName,
+                             (err.isEmpty() ? out : err).toHtmlEscaped()));
+                return;
+            }
+            emit disableToggled(true);
+            accept();
+            return;
+        }
+
+        bool disabling = !m_info.disabled;
         QString msg = disabling
             ? QString("This will disable %1. The device will not function "
                       "until it is re-enabled.\n\nContinue?").arg(safeName)

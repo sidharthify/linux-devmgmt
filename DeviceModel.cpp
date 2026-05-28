@@ -213,6 +213,8 @@ QVariant DeviceModel::deviceField(const QModelIndex &index,
     if (field == "isDkms") return d.isDkms;
     if (field == "rawLocation") return d.rawLocation;
     if (field == "sysfsPciPath") return d.sysfsPciPath;
+    if (field == "btAddress") return d.btAddress;
+    if (field == "noDriverNeeded") return d.noDriverNeeded;
     if (field == "deviceType") {
         if (n->parent && n->parent->type == CategoryNode)
             return n->parent->label;
