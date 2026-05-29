@@ -10,14 +10,23 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 add_executable(devmgmt
-    main.cpp
-    MainWindow.cpp
-    DeviceModel.cpp
-    DeviceOps.cpp
-    DevicePropertiesDialog.cpp
-    DriverDetailsDialog.cpp
-    UpdateDriverDialog.cpp
-    SysfsScanner.cpp
-    DeviceScanner.cpp
+    src/main.cpp
+    src/model/DeviceModel.cpp
+    src/model/DeviceOps.cpp
+    src/scanner/SysfsScanner.cpp
+    src/scanner/DeviceScanner.cpp
+    src/ui/MainWindow.cpp
+    src/ui/DevicePropertiesDialog.cpp
+    src/ui/DriverDetailsDialog.cpp
+    src/ui/UpdateDriverDialog.cpp
 )
+
+target_include_directories(devmgmt PRIVATE
+    src/model
+    src/scanner
+    src/ui
+)
+
 target_link_libraries(devmgmt PRIVATE Qt6::Widgets)
+
+install(TARGETS devmgmt RUNTIME DESTINATION bin)
