@@ -237,7 +237,7 @@ QWidget *DevicePropertiesDialog::buildDriverTab() {
         ++fRow;
     };
 
-    if (m_info.noDriverNeeded) {
+    if (m_info.noDriverNeeded || m_info.disabled) {
         addFormRow(makeWrappingKey("Driver Provider:"), makeWrappingValue("Unknown"));
         addFormRow(makeWrappingKey("Driver Date:"), makeWrappingValue("Not available"));
         addFormRow(makeWrappingKey("Driver Version:"), makeWrappingValue("Not available"));

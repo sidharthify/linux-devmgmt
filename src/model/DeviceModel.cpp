@@ -132,7 +132,7 @@ void DeviceModel::setCategories(const QString &hostName,
         host->children.append(disabledCat);
         for (const Device *dev : disabledDevices) {
             auto *devNode = new Node{DeviceNode, dev->name,
-                                     dev->iconName,
+                                     "computer",
                                      disabledCat, {}, dev};
             disabledCat->children.append(devNode);
         }
@@ -208,7 +208,7 @@ QVariant DeviceModel::deviceField(const QModelIndex &index,
     if (field == "driverDate") return d.driverDate;
     if (field == "driverAuthor") return d.driverAuthor;
     if (field == "location") return d.location;
-    if (field == "iconName") return d.iconName;
+    if (field == "iconName") return d.disabled ? QStringLiteral("computer") : d.iconName;
     if (field == "disabled") return d.disabled;
     if (field == "isDkms") return d.isDkms;
     if (field == "rawLocation") return d.rawLocation;
@@ -216,7 +216,8 @@ QVariant DeviceModel::deviceField(const QModelIndex &index,
     if (field == "btAddress") return d.btAddress;
     if (field == "noDriverNeeded") return d.noDriverNeeded;
     if (field == "deviceType") {
-        if (n->parent && n->parent->type == CategoryNode)
+        if (n->parent && (n->parent->type == CategoryNode
+                          || n->parent->type == DisabledCategoryNode))
             return n->parent->label;
         return QStringLiteral("Hardware device");
     }
